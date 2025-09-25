@@ -57,7 +57,8 @@ def parse(parser):
     torch.manual_seed(args.seed)
     if int((torch.__version__)[0]) > 1:
         torch.set_float32_matmul_precision('high') # it should be set to high for torch2.0
-    init_logger(logger, os.path.join(args.path, f"{args.mode}.log"))
+    log_path = os.path.join(args.path, f"{args.mode}.log") if args.path else None
+    init_logger(logger, log_path)
     logger.info('\n' + str(args))
 
     if use_whisper and args.mode != 'api':
