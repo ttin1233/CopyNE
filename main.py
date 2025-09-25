@@ -3,6 +3,7 @@ import os
 import torch
 import gradio as gr
 from asr import CTCAttentionASRParser, CLASCTCAttentionASRParser, CopyNEASRParser, ParaformerASRParser
+from whisper_asr import WhisperASRParser
 from supar.utils.logging import init_logger, logger
 from torch.distributed import init_process_group, destroy_process_group
 from utils.data import make_ne_vocab_file
@@ -15,7 +16,11 @@ def ddp_setup():
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
 def parse(parser):
-    ddp_setup()
+    parser.add_argument('--asr_backend', default='whisper', choices=['wenet', 'whisper'], help='backend ASR model to use')
+    parser.add_argument('--whisper_model', default='base', help='name of the Whisper checkpoint to load')
+    parser.add_argument('--whisper_language', default=None, help='language hint passed to Whisper (use "auto" to detect)')
+    parser.add_argument('--whisper_task', default='transcribe', choices=['transcribe', 'translate'], help='Whisper decoding task')
+    parser.add_argument('--whisper_temperature', default=0.0, type=float, help='sampling temperature for Whisper decoding')
     parser.add_argument('--path', help='path to model file')
     parser.add_argument('--pre_model', type=str, default="None")
     parser.add_argument('--seed', '-s', default=1, type=int, help='seed for generating random numbers')
@@ -38,40 +43,54 @@ def parse(parser):
     parser.add_argument('--add_copy_loss', action='store_true')
     parser.add_argument('--no_concat', action='store_true')
     parser.add_argument('--use_avg', action='store_true')
+    parser.add_argument('--device', default='-1', type=str, help='CUDA device index, -1 to force CPU')
 
     args, unknown = parser.parse_known_args()
     args, _ = parser.parse_known_args(unknown, args)
 
+    use_whisper = args.asr_backend == 'whisper'
+    ddp_initialized = False
+    if not use_whisper:
+        ddp_setup()
+        ddp_initialized = True
+
     torch.manual_seed(args.seed)
     if int((torch.__version__)[0]) > 1:
         torch.set_float32_matmul_precision('high') # it should be set to high for torch2.0
-    init_logger(logger, os.path.join(args.path, f"{args.mode}.log"))
+    log_path = os.path.join(args.path, f"{args.mode}.log") if args.path else None
+    init_logger(logger, log_path)
     logger.info('\n' + str(args))
+
+    if use_whisper and args.mode != 'api':
+        raise NotImplementedError('Whisper backend currently supports API mode only.')
 
     if args.mode == 'train':
         if not args.add_context:
-            parser = CTCAttentionASRParser(args)
+            engine = CTCAttentionASRParser(args)
         else:
             if not args.add_copy_loss:
-                parser = CLASCTCAttentionASRParser(args)
+                engine = CLASCTCAttentionASRParser(args)
             else:
-                parser = CopyNEASRParser(args)
-        logger.info(f'{parser.model}\n')
-        parser.train()
+                engine = CopyNEASRParser(args)
+        logger.info(f'{engine.model}\n')
+        engine.train()
     elif args.mode == 'evaluate':
         if not args.add_context:
-            parser = CTCAttentionASRParser(args)
+            engine = CTCAttentionASRParser(args)
         else:
             if not args.add_copy_loss:
-                parser = CLASCTCAttentionASRParser(args)
+                engine = CLASCTCAttentionASRParser(args)
             else:
-                parser = CopyNEASRParser(args)
-        logger.info(f'{parser.model}\n')
-        parser.eval()
+                engine = CopyNEASRParser(args)
+        logger.info(f'{engine.model}\n')
+        engine.eval()
     elif args.mode == 'api':
-        assert args.add_context
-        assert args.add_copy_loss
-        parser = CopyNEASRParser(args)
+        if use_whisper:
+            engine = WhisperASRParser(args)
+        else:
+            assert args.add_context
+            assert args.add_copy_loss
+            engine = CopyNEASRParser(args)
 
         # 定义处理上传的音频和词典文件的函数
         def process_audio(audio_file_path, dictionary_input_text, dictionary_input_file, input_type, copy_threshold=0.9):
@@ -84,7 +103,7 @@ def parse(parser):
                 dictionary_content = dictionary_input_text
                 dictionary_file_path = make_ne_vocab_file(dictionary_input_text, input_type, tmp_dir=random_dir_path)
             # 调用ASR模型进行转录
-            transcription = parser.api(audio_file_path, dictionary_file_path, copy_threshold, tmp_dir=random_dir_path)
+            transcription = engine.api(audio_file_path, dictionary_file_path, copy_threshold, tmp_dir=random_dir_path)
             # del the dir
             shutil.rmtree(random_dir_path)
             return transcription, dictionary_content
@@ -188,7 +207,8 @@ def parse(parser):
         # 运行Gradio应用
         demo.launch()
 
-    destroy_process_group()
+    if ddp_initialized:
+        destroy_process_group()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(allow_abbrev=False)

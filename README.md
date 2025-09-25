@@ -38,8 +38,33 @@ We provide a pre-trained model for CopyNE training with the conf/copyne-conforme
 ## Web Demo
 We provide a web demo for CopyNE. You can upload or record your own audio and set personalized context dictionary.
 You can run the following command to start the web demo. The demo is based on Gradio. The demo will run at http://127.0.0.1:7860.
+
+### Whisper backend (default)
+
+Whisper ships with the project as the default inference backend. It only requires a
+log directory for saving runtime logs.
+
 ```shell
-CUDA_VISIBLE_DEVICES=0 torchrun --nnodes=1 --nproc_per_node=1 main.py api --char_dict data_to_upload/multi_char.vocab \
+# 1. Install the runtime dependencies (FFmpeg is required by Whisper)
+sudo apt-get update && sudo apt-get install -y ffmpeg
+pip install -r requirements.txt
+
+# 2. Launch the Gradio demo with Whisper
+python main.py api --asr_backend whisper --whisper_model base --path runs/whisper-logs
+```
+
+The command above downloads the Whisper ``base`` checkpoint on first run. Use the
+``--whisper_model`` argument to select another checkpoint size (for example
+``small`` or ``medium``) and ``--device 0`` to run on GPU if available.
+
+### WeNet/CopyNE backend
+
+To launch the original CopyNE+WeNet demo, point ``--path`` to the directory that
+contains the trained checkpoint and enable contextual CopyNE decoding flags.
+
+```shell
+CUDA_VISIBLE_DEVICES=0 torchrun --nnodes=1 --nproc_per_node=1 main.py api --asr_backend wenet \
+                     --char_dict data_to_upload/multi_char.vocab \
                      --add_context \
                      --add_copy_loss \
                      --config conf/copyne-conformer.yaml \
